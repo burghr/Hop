@@ -19,6 +19,26 @@ First run creates a `.venv` and installs dependencies (`rumps`, `pyobjc`).
 Subsequent runs just launch the app. It lives in the menu bar with no Dock
 icon.
 
+### Start at login (optional)
+
+To have Hop launch automatically when you log in:
+
+```sh
+./install.sh
+```
+
+This installs a LaunchAgent at `~/Library/LaunchAgents/com.burghr.hop.plist`
+that runs `./run.sh` at login. Stdout/stderr go to `/tmp/hop.out.log` and
+`/tmp/hop.err.log`.
+
+To disable login launch:
+
+```sh
+./uninstall.sh
+```
+
+(Project files aren't touched — only the LaunchAgent is removed.)
+
 ## How to use
 
 Click 🐇 in the menu bar to open the panel. The text field is pre-filled
