@@ -1,7 +1,8 @@
 # Hop 🐇
 
 A keyboard-driven address bar for macOS Finder. Click the bunny in your menu
-bar, type a path, hit Enter — Finder jumps there.
+bar, type a path, hit Enter — Finder jumps there. Tab-completes paths,
+remembers recent destinations, and lets you star any folder as a favorite.
 
 ## Why
 
@@ -45,6 +46,10 @@ Click 🐇 in the menu bar to open the panel. The text field is pre-filled
 with the path of the frontmost Finder window (or `~` if no Finder window is
 open).
 
+The panel always shows your **Favorites** and **History** sections beneath
+the text field, so frequent folders are one click away. Tab-completions
+appear above them when you're actively typing.
+
 ### Keys
 
 | Key            | Action                                                       |
@@ -52,16 +57,30 @@ open).
 | `Enter`        | Navigate Finder to the typed path                            |
 | `Tab`          | Tab-complete: fill in the common prefix, show matches below  |
 | `Tab` (again)  | Accept the first / highlighted completion, then re-complete  |
-| `→` (at end)   | Same as Tab when completions are showing                     |
-| `↑` / `↓`      | Move the keyboard selection through the completion list      |
+| `→` (at end)   | Same as Tab — accept the selected/first row                  |
+| `↑` / `↓`      | Move the keyboard selection through all rows (completions, favorites, history) |
 | `Esc`          | Close the panel                                              |
 | `Cmd-Q`        | Quit Hop                                                     |
 
+When you select a favorite or history row with `↑/↓` and press `Tab`, `→`,
+or `Enter`, Finder navigates to it and the panel closes.
+
 ### Mouse
 
-- **Hover** a completion to highlight it (Tab will then accept that one)
-- **Click** a completion to navigate Finder there immediately
+- **Hover** any row to highlight it
+- **Click the path** to navigate Finder and close the panel
+- **Click the star** (☆ / ★) to add or remove that path from favorites
 - **Click outside** the panel to dismiss it
+
+### Favorites & History
+
+- Every time you navigate to a folder (via Enter, click, or accept), it's
+  added to your history (most recent first, up to 50 stored, 12 shown).
+- Click the empty star next to any row to favorite it. Click a filled star
+  to unfavorite. Favorites appear at the top, before history, and aren't
+  duplicated in the history section.
+- Data is stored at `~/Library/Application Support/Hop/data.json`. Safe to
+  edit or delete by hand if you want to clear it.
 
 ### Tab-completion behavior
 

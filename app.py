@@ -3,8 +3,9 @@
 
 Clicking 🐇 in the menu bar drops down a floating panel pre-filled with the
 current Finder window's path. Enter navigates, Escape dismisses, Tab
-completes. Multiple Tab matches appear as a clickable list; clicking or
-pressing Tab/Right on a hovered/selected entry navigates Finder directly.
+completes. Multiple Tab matches appear as a clickable list, followed by
+your starred favorites and recent history. Click the star next to any path
+to add or remove it from favorites.
 
 A custom NSPanel is used instead of NSMenu because NSMenu's tracking loop
 captures keyboard events once items are visible, preventing the embedded
@@ -12,6 +13,7 @@ text field from ever seeing Tab/arrow keys.
 """
 
 import glob
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -21,6 +23,7 @@ from AppKit import (
     NSApp,
     NSApplication,
     NSBackingStoreBuffered,
+    NSButton,
     NSColor,
     NSEvent,
     NSEventMaskLeftMouseDown,
@@ -46,6 +49,33 @@ from AppKit import (
     NSWindowStyleMaskNonactivatingPanel,
 )
 from PyObjCTools import AppHelper
+
+
+# ── Storage ───────────────────────────────────────────────────────────────────
+
+DATA_DIR = Path.home() / 'Library' / 'Application Support' / 'Hop'
+DATA_FILE = DATA_DIR / 'data.json'
+
+
+def load_data():
+    try:
+        with open(DATA_FILE) as f:
+            d = json.load(f)
+        return {
+            'favorites': list(d.get('favorites', [])),
+            'history': list(d.get('history', [])),
+        }
+    except Exception:
+        return {'favorites': [], 'history': []}
+
+
+def save_data(data):
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        with open(DATA_FILE, 'w') as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
 
 
 # ── AppleScript helpers ───────────────────────────────────────────────────────
@@ -105,12 +135,42 @@ PANEL_W = 360
 TF_H = 24
 ERR_H = 18
 ROW_H = 22
+HEADER_H = 18
 PADDING = 8
-TOP_GAP = 4  # gap between status item and panel top edge
-MAX_COMPLETIONS = 12
+SECTION_GAP = 6
+TOP_GAP = 4
+MAX_COMPLETIONS = 10
+MAX_FAVORITES = 8
+MAX_HISTORY = 12
+MAX_HISTORY_STORED = 50
 
 
-# ── Completion row view ───────────────────────────────────────────────────────
+# ── Section header view ───────────────────────────────────────────────────────
+
+class _SectionHeader(NSView):
+
+    def initWithFrame_(self, frame):
+        self = objc.super(_SectionHeader, self).initWithFrame_(frame)
+        if self is None:
+            return None
+        label = NSTextField.alloc().initWithFrame_(
+            NSMakeRect(12, 0, frame.size.width - 16, frame.size.height)
+        )
+        label.setBezeled_(False)
+        label.setDrawsBackground_(False)
+        label.setEditable_(False)
+        label.setSelectable_(False)
+        label.setFont_(NSFont.systemFontOfSize_(10))
+        label.setTextColor_(NSColor.secondaryLabelColor())
+        self.addSubview_(label)
+        self._label = label
+        return self
+
+    def setText_(self, text):
+        self._label.setStringValue_(text.upper())
+
+
+# ── Row view (used for completions, favorites, and history) ──────────────────
 
 class _CompletionRow(NSView):
 
@@ -118,21 +178,41 @@ class _CompletionRow(NSView):
         self = objc.super(_CompletionRow, self).initWithFrame_(frame)
         if self is None:
             return None
+
+        # Star toggle (left)
+        star = NSButton.alloc().initWithFrame_(
+            NSMakeRect(2, 1, 22, frame.size.height - 2)
+        )
+        star.setBordered_(False)
+        star.setTitle_('☆')
+        star.setFont_(NSFont.systemFontOfSize_(14))
+        star.setTarget_(self)
+        star.setAction_(b'starClicked:')
+        star.setFocusRingType_(1)  # NSFocusRingTypeNone
+        self.addSubview_(star)
+        self._star = star
+
+        # Path label (right of star)
         label = NSTextField.alloc().initWithFrame_(
-            NSMakeRect(12, 1, frame.size.width - 16, frame.size.height - 2)
+            NSMakeRect(26, 1, frame.size.width - 30, frame.size.height - 2)
         )
         label.setBezeled_(False)
         label.setDrawsBackground_(False)
         label.setEditable_(False)
         label.setSelectable_(False)
         label.setFont_(NSFont.systemFontOfSize_(13))
+        cell = label.cell()
+        cell.setLineBreakMode_(6)  # NSLineBreakByTruncatingHead
+        cell.setTruncatesLastVisibleLine_(True)
         self.addSubview_(label)
         self._label = label
+
         self._path = None
         self._selected = False
+        self._is_fav = False
         self._panel = None
         self._tf_del = None
-        self._index = -1
+
         opts = (
             NSTrackingMouseEnteredAndExited
             | NSTrackingActiveAlways
@@ -147,6 +227,10 @@ class _CompletionRow(NSView):
     def setPath_(self, path):
         self._path = path
         self._label.setStringValue_(path or "")
+
+    def setFavorite_(self, is_fav):
+        self._is_fav = bool(is_fav)
+        self._star.setTitle_('★' if is_fav else '☆')
 
     def setSelected_(self, sel):
         if self._selected == sel:
@@ -164,14 +248,16 @@ class _CompletionRow(NSView):
             NSRectFill(self.bounds())
 
     def mouseEntered_(self, event):
-        if self._tf_del and self._path and self._index >= 0:
-            self._tf_del._hover_select(self._index)
+        if self._tf_del and self._path:
+            self._tf_del._hover_select_row(self)
 
     def mouseUp_(self, event):
-        if self._path:
-            navigate_finder(self._path)
-        if self._panel:
-            self._panel.orderOut_(None)
+        if self._tf_del and self._path:
+            self._tf_del._navigate_to(self._path)
+
+    def starClicked_(self, sender):
+        if self._tf_del and self._path:
+            self._tf_del._toggle_favorite(self._path)
 
 
 # ── Panel ─────────────────────────────────────────────────────────────────────
@@ -182,11 +268,9 @@ class _Panel(NSPanel):
         return True
 
     def keyDown_(self, event):
-        # Escape dismisses the panel even if focus has drifted off the field.
-        if event.keyCode() == 53:
+        if event.keyCode() == 53:  # Esc
             self.orderOut_(None)
             return
-        # Cmd-Q quits, since there's no menu bar item for it anymore.
         mods = event.modifierFlags() & NSEventModifierFlagCommand
         if mods and event.charactersIgnoringModifiers() == 'q':
             NSApp.terminate_(None)
@@ -205,12 +289,28 @@ class _TFDelegate(NSObject):
         self._tf = None
         self._err_label = None
         self._panel = None
-        self._pool = []        # list[_CompletionRow]
-        self._n_visible = 0
+        self._fav_header = None
+        self._hist_header = None
+        self._completion_rows = []
+        self._favorite_rows = []
+        self._history_rows = []
+        self._n_comp = 0
+        self._n_fav = 0
+        self._n_hist = 0
+        self._selectable = []
         self._sel = -1
         self._base_text = ""
         self._programmatic = False
+        self._data = {'favorites': [], 'history': []}
         return self
+
+    # ── Public ──────────────────────────────────────────────────────────────
+
+    def loadAndRender(self):
+        self._data = load_data()
+        self._render_sections()
+
+    # ── Command selectors ───────────────────────────────────────────────────
 
     @objc.typedSelector(b'B@:@@:')
     def control_textView_doCommandBySelector_(self, control, textView, cmd):
@@ -223,47 +323,68 @@ class _TFDelegate(NSObject):
             self._do_navigate()
             return True
         if sel == 'insertTab:':
-            if self._n_visible:
-                self._accept_completion()
+            if self._n_comp > 0 or self._sel >= 0:
+                self._accept_or_navigate()
             else:
                 self._do_tab_complete()
             return True
-        if sel == 'moveRight:' and self._n_visible:
+        if sel == 'moveRight:':
             rng = textView.selectedRange()
-            if rng.location + rng.length >= len(self._tf.stringValue()):
-                self._accept_completion()
+            at_end = rng.location + rng.length >= len(self._tf.stringValue())
+            if at_end and (self._n_comp > 0 or self._sel >= 0):
+                self._accept_or_navigate()
                 return True
-        if sel == 'moveDown:' and self._n_visible:
+        if sel == 'moveDown:' and self._selectable:
             self._move_sel(+1)
             return True
-        if sel == 'moveUp:' and self._n_visible:
+        if sel == 'moveUp:' and self._selectable:
             self._move_sel(-1)
             return True
         return False
 
     def controlTextDidChange_(self, notification):
         if not self._programmatic:
+            self._base_text = self._tf.stringValue()
             self._clear_completions()
 
-    # ── private ──────────────────────────────────────────────────────────────
+    # ── Navigation ──────────────────────────────────────────────────────────
 
     def _do_navigate(self):
         raw = self._tf.stringValue()
-        path = Path(raw).expanduser().resolve()
+        try:
+            path = Path(raw).expanduser().resolve()
+        except Exception:
+            self._show_error(f'Bad path: {raw}')
+            return
         if not path.exists():
-            self._err_label.setStringValue_(f'Path does not exist: {raw}')
-            self._err_label.setHidden_(False)
-            self._relayout()
+            self._show_error(f'Path does not exist: {raw}')
             return
         if not path.is_dir():
-            self._err_label.setStringValue_(f'Not a directory: {raw}')
-            self._err_label.setHidden_(False)
-            self._relayout()
+            self._show_error(f'Not a directory: {raw}')
             return
-        self._clear_completions()
         self._err_label.setHidden_(True)
-        navigate_finder(str(path))
+        self._navigate_to(str(path))
+
+    def _show_error(self, msg):
+        self._err_label.setStringValue_(msg)
+        self._err_label.setHidden_(False)
+        self._relayout()
+
+    def _navigate_to(self, path):
+        norm = path.rstrip('/') + '/'
+        self._record_history(norm)
+        navigate_finder(path)
         self._panel.orderOut_(None)
+
+    def _record_history(self, path):
+        h = self._data['history']
+        if path in h:
+            h.remove(path)
+        h.insert(0, path)
+        del h[MAX_HISTORY_STORED:]
+        save_data(self._data)
+
+    # ── Tab complete / accept ───────────────────────────────────────────────
 
     def _set_value(self, text):
         self._programmatic = True
@@ -287,69 +408,142 @@ class _TFDelegate(NSObject):
         if len(matches) > 1:
             self._show_completions(matches)
 
-    def _accept_completion(self):
-        if self._sel >= 0:
-            path = self._pool[self._sel]._path
-        elif self._n_visible > 0:
-            path = self._pool[0]._path
-        else:
+    def _accept_or_navigate(self):
+        # No selection? Default to first completion if there is one.
+        if self._sel < 0:
+            if self._n_comp > 0:
+                self._accept_completion(self._completion_rows[0]._path)
             return
+        row = self._selectable[self._sel]
+        # If selected row is a tab completion, do the accept-and-recomplete dance.
+        if row in self._completion_rows[:self._n_comp]:
+            self._accept_completion(row._path)
+        else:
+            self._navigate_to(row._path)
+
+    def _accept_completion(self, path):
         if not path:
             return
         self._set_value(path)
         self._base_text = path
-        self._clear_completions()
+        self._n_comp = 0
         self._do_tab_complete()
 
+    # ── Selection / hover ───────────────────────────────────────────────────
+
     def _move_sel(self, delta: int):
+        n = len(self._selectable)
+        if n == 0:
+            return
         new = self._sel + delta
-        new = max(-1, min(self._n_visible - 1, new))
+        new = max(-1, min(n - 1, new))
         if new == self._sel:
             return
         self._sel = new
-        self._refresh_titles()
-        text = self._base_text if new == -1 else (self._pool[new]._path or "")
+        self._refresh_selection()
+        text = self._base_text if new == -1 else (self._selectable[new]._path or "")
         self._set_value(text)
 
-    def _hover_select(self, index: int):
-        if index == self._sel or index < 0 or index >= self._n_visible:
+    def _hover_select_row(self, row):
+        try:
+            idx = self._selectable.index(row)
+        except ValueError:
             return
-        self._sel = index
-        self._refresh_titles()
+        if idx == self._sel:
+            return
+        self._sel = idx
+        self._refresh_selection()
 
-    def _refresh_titles(self):
-        for i, row in enumerate(self._pool):
-            row.setSelected_(i == self._sel and i < self._n_visible)
+    def _refresh_selection(self):
+        for i, row in enumerate(self._selectable):
+            row.setSelected_(i == self._sel)
+
+    # ── Section rendering ───────────────────────────────────────────────────
 
     def _show_completions(self, paths):
         n = min(len(paths), MAX_COMPLETIONS)
-        self._n_visible = n
-        self._sel = -1
-        for i, row in enumerate(self._pool):
+        self._n_comp = n
+        favset = set(self._data['favorites'])
+        for i, row in enumerate(self._completion_rows):
             if i < n:
                 row.setPath_(paths[i])
+                row.setFavorite_(paths[i] in favset)
                 row.setSelected_(False)
-        self._relayout()
+        self._render_sections()
 
     def _clear_completions(self):
-        had = self._n_visible > 0
-        self._n_visible = 0
+        if self._n_comp == 0:
+            if self._sel != -1:
+                self._sel = -1
+                self._refresh_selection()
+            return
+        self._n_comp = 0
+        self._render_sections()
+
+    def _render_sections(self):
+        """Rebuild selectable list, populate fav/hist rows, then relayout."""
+        self._selectable = []
         self._sel = -1
-        for row in self._pool:
-            row.setSelected_(False)
-        if had:
-            self._relayout()
+
+        favset = set(self._data['favorites'])
+
+        # Completions (already populated by _show_completions)
+        for i in range(self._n_comp):
+            self._selectable.append(self._completion_rows[i])
+
+        # Favorites
+        favs = self._data['favorites'][:MAX_FAVORITES]
+        self._n_fav = len(favs)
+        for i, row in enumerate(self._favorite_rows):
+            if i < self._n_fav:
+                row.setPath_(favs[i])
+                row.setFavorite_(True)
+                row.setSelected_(False)
+                self._selectable.append(row)
+
+        # History (excluding paths already shown as favorites)
+        hist = [p for p in self._data['history'] if p not in favset][:MAX_HISTORY]
+        self._n_hist = len(hist)
+        for i, row in enumerate(self._history_rows):
+            if i < self._n_hist:
+                row.setPath_(hist[i])
+                row.setFavorite_(False)
+                row.setSelected_(False)
+                self._selectable.append(row)
+
+        self._relayout()
+
+    def _toggle_favorite(self, path):
+        favs = self._data['favorites']
+        if path in favs:
+            favs.remove(path)
+        else:
+            favs.insert(0, path)
+            del favs[MAX_FAVORITES * 3:]
+        save_data(self._data)
+        self._render_sections()
+
+    # ── Layout ──────────────────────────────────────────────────────────────
 
     def _compute_height(self) -> int:
         h = PADDING + TF_H + PADDING
         if not self._err_label.isHidden():
             h += ERR_H + PADDING
-        if self._n_visible > 0:
-            h += self._n_visible * ROW_H + PADDING
+        if self._n_comp > 0:
+            h += self._n_comp * ROW_H
+        if self._n_fav > 0:
+            if self._n_comp > 0:
+                h += SECTION_GAP
+            h += HEADER_H + self._n_fav * ROW_H
+        if self._n_hist > 0:
+            if self._n_comp > 0 or self._n_fav > 0:
+                h += SECTION_GAP
+            h += HEADER_H + self._n_hist * ROW_H
+        if self._n_comp > 0 or self._n_fav > 0 or self._n_hist > 0:
+            h += PADDING
         return h
 
     def _layout_subviews(self, h: int):
-        # Top-down layout (NSView origin = bottom-left).
         y = h - PADDING - TF_H
         self._tf.setFrame_(NSMakeRect(PADDING, y, PANEL_W - 2 * PADDING, TF_H))
 
@@ -359,20 +553,53 @@ class _TFDelegate(NSObject):
                 NSMakeRect(PADDING, y, PANEL_W - 2 * PADDING, ERR_H)
             )
 
-        if self._n_visible > 0:
+        any_section = self._n_comp > 0 or self._n_fav > 0 or self._n_hist > 0
+        if any_section:
             y -= PADDING
-            for i in range(MAX_COMPLETIONS):
-                row = self._pool[i]
-                if i < self._n_visible:
-                    y -= ROW_H
-                    row.setFrame_(
-                        NSMakeRect(PADDING, y, PANEL_W - 2 * PADDING, ROW_H)
-                    )
-                    row.setHidden_(False)
-                else:
-                    row.setHidden_(True)
+
+        # Completions
+        for i, row in enumerate(self._completion_rows):
+            if i < self._n_comp:
+                y -= ROW_H
+                row.setFrame_(NSMakeRect(0, y, PANEL_W, ROW_H))
+                row.setHidden_(False)
+            else:
+                row.setHidden_(True)
+
+        # Favorites
+        if self._n_fav > 0:
+            if self._n_comp > 0:
+                y -= SECTION_GAP
+            y -= HEADER_H
+            self._fav_header.setFrame_(NSMakeRect(0, y, PANEL_W, HEADER_H))
+            self._fav_header.setText_('Favorites')
+            self._fav_header.setHidden_(False)
         else:
-            for row in self._pool:
+            self._fav_header.setHidden_(True)
+        for i, row in enumerate(self._favorite_rows):
+            if i < self._n_fav:
+                y -= ROW_H
+                row.setFrame_(NSMakeRect(0, y, PANEL_W, ROW_H))
+                row.setHidden_(False)
+            else:
+                row.setHidden_(True)
+
+        # History
+        if self._n_hist > 0:
+            if self._n_comp > 0 or self._n_fav > 0:
+                y -= SECTION_GAP
+            y -= HEADER_H
+            self._hist_header.setFrame_(NSMakeRect(0, y, PANEL_W, HEADER_H))
+            self._hist_header.setText_('History')
+            self._hist_header.setHidden_(False)
+        else:
+            self._hist_header.setHidden_(True)
+        for i, row in enumerate(self._history_rows):
+            if i < self._n_hist:
+                y -= ROW_H
+                row.setFrame_(NSMakeRect(0, y, PANEL_W, ROW_H))
+                row.setHidden_(False)
+            else:
                 row.setHidden_(True)
 
     def _relayout(self):
@@ -399,7 +626,6 @@ class _AppDelegate(NSObject):
 
         self._build_panel()
 
-        # Dismiss panel when user clicks anywhere outside our app.
         self._mouse_monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
             NSEventMaskLeftMouseDown | NSEventMaskRightMouseDown,
             self._on_outside_click,
@@ -416,26 +642,26 @@ class _AppDelegate(NSObject):
             self._show_panel()
 
     def _show_panel(self):
-        # Reset state
-        self._tf_del._n_visible = 0
-        self._tf_del._sel = -1
-        for row in self._tf_del._pool:
-            row.setSelected_(False)
-            row.setHidden_(True)
-        self._err_label.setHidden_(True)
-        self._tf.setStringValue_(get_finder_path() or str(Path.home()))
-
-        # Position panel: top edge `TOP_GAP` below status item, centered on it.
+        # Position the panel first with a minimal height; _render_sections will
+        # resize it, anchored to the top edge.
         button = self._status.button()
         btn_frame = button.window().convertRectToScreen_(button.frame())
         top_y = btn_frame.origin.y - TOP_GAP
         center_x = btn_frame.origin.x + btn_frame.size.width / 2
-
-        h = self._tf_del._compute_height()
         x = center_x - PANEL_W / 2
-        y = top_y - h
-        self._panel.setFrame_display_(NSMakeRect(x, y, PANEL_W, h), False)
-        self._tf_del._layout_subviews(h)
+        minimal_h = PADDING + TF_H + PADDING
+        self._panel.setFrame_display_(
+            NSMakeRect(x, top_y - minimal_h, PANEL_W, minimal_h), False
+        )
+
+        # Reset transient state and pre-fill text field.
+        self._tf_del._n_comp = 0
+        self._err_label.setHidden_(True)
+        self._tf.setStringValue_(get_finder_path() or str(Path.home()))
+        self._tf_del._base_text = self._tf.stringValue()
+
+        # Load data and lay out (resizes panel, keeps top anchored).
+        self._tf_del.loadAndRender()
 
         self._panel.makeKeyAndOrderFront_(None)
         self._panel.makeFirstResponder_(self._tf)
@@ -454,11 +680,8 @@ class _AppDelegate(NSObject):
         panel.setBackgroundColor_(NSColor.clearColor())
         panel.setHidesOnDeactivate_(False)
 
-        # Vibrant menu-style background with rounded corners.
         content = NSVisualEffectView.alloc().initWithFrame_(rect)
-        # Material 5 = NSVisualEffectMaterialMenu (the constant isn't always
-        # exported by pyobjc; use the raw value).
-        content.setMaterial_(5)
+        content.setMaterial_(5)  # NSVisualEffectMaterialMenu
         content.setBlendingMode_(NSVisualEffectBlendingModeBehindWindow)
         content.setState_(NSVisualEffectStateActive)
         content.setWantsLayer_(True)
@@ -485,24 +708,43 @@ class _AppDelegate(NSObject):
         err.setHidden_(True)
         content.addSubview_(err)
 
-        pool = []
-        for i in range(MAX_COMPLETIONS):
+        def _make_row():
             row = _CompletionRow.alloc().initWithFrame_(
-                NSMakeRect(PADDING, 0, PANEL_W - 2 * PADDING, ROW_H)
+                NSMakeRect(0, 0, PANEL_W, ROW_H)
             )
             row._panel = panel
-            row._index = i
             row.setHidden_(True)
             content.addSubview_(row)
-            pool.append(row)
+            return row
+
+        completion_rows = [_make_row() for _ in range(MAX_COMPLETIONS)]
+        favorite_rows = [_make_row() for _ in range(MAX_FAVORITES)]
+        history_rows = [_make_row() for _ in range(MAX_HISTORY)]
+
+        fav_header = _SectionHeader.alloc().initWithFrame_(
+            NSMakeRect(0, 0, PANEL_W, HEADER_H)
+        )
+        fav_header.setHidden_(True)
+        content.addSubview_(fav_header)
+
+        hist_header = _SectionHeader.alloc().initWithFrame_(
+            NSMakeRect(0, 0, PANEL_W, HEADER_H)
+        )
+        hist_header.setHidden_(True)
+        content.addSubview_(hist_header)
 
         tf_del = _TFDelegate.alloc().init()
         tf_del._tf = tf
         tf_del._err_label = err
         tf_del._panel = panel
-        tf_del._pool = pool
+        tf_del._fav_header = fav_header
+        tf_del._hist_header = hist_header
+        tf_del._completion_rows = completion_rows
+        tf_del._favorite_rows = favorite_rows
+        tf_del._history_rows = history_rows
         tf.setDelegate_(tf_del)
-        for row in pool:
+
+        for row in completion_rows + favorite_rows + history_rows:
             row._tf_del = tf_del
 
         self._panel = panel
