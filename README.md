@@ -20,31 +20,23 @@ First run creates a `.venv` and installs dependencies (`rumps`, `pyobjc`).
 Subsequent runs just launch the app. It lives in the menu bar with no Dock
 icon.
 
-### Start at login (optional)
+### Start at login
 
-To have Hop launch automatically when you log in:
-
-```sh
-./install.sh
-```
-
+The easiest way: right-click 🐇 → **Settings…** → toggle **Start Hop at login**.
 This installs a LaunchAgent at `~/Library/LaunchAgents/com.burghr.hop.plist`
 that runs `./run.sh` at login. Stdout/stderr go to `/tmp/hop.out.log` and
 `/tmp/hop.err.log`.
 
-To disable login launch:
-
-```sh
-./uninstall.sh
-```
-
-(Project files aren't touched — only the LaunchAgent is removed.)
+You can also run `./install.sh` and `./uninstall.sh` from the project
+folder to do the same thing from the command line.
 
 ## How to use
 
-Click 🐇 in the menu bar to open the panel. The text field is pre-filled
-with the path of the frontmost Finder window (or `~` if no Finder window is
-open).
+**Left-click** 🐇 in the menu bar to open the panel. The text field is
+pre-filled with the path of the frontmost Finder window (or `~` if no
+Finder window is open).
+
+**Right-click** 🐇 for **Settings…** and **Quit Hop**.
 
 The panel always shows your **Favorites** and **History** sections beneath
 the text field, so frequent folders are one click away. Tab-completions
@@ -97,9 +89,25 @@ It works like shell tab-completion:
 `~` is expanded to your home directory. Only directories are listed (not
 files), because the goal is to navigate Finder.
 
+## Settings
+
+Right-click 🐇 → **Settings…** to configure:
+
+- **Menu bar icon** — Bunny 🐇 or Folder 📁.
+- **Max history entries** — how many history rows to show (0–12). Stored
+  history isn't trimmed; this just changes the display cap.
+- **Global hotkey** — click **Record**, then press the combo you want
+  (must include at least one modifier: ⌘/⇧/⌥/⌃). Press the hotkey from
+  anywhere to toggle Hop. Uses Carbon's `RegisterEventHotKey`, so the
+  combo is consumed system-wide — pick something not already bound. Press
+  **Esc** while recording to cancel.
+- **Start Hop at login** — toggles the LaunchAgent.
+
+Settings are saved to `~/Library/Application Support/Hop/data.json`.
+
 ## Quitting
 
-`Cmd-Q` while the panel is open, or kill the process from Activity Monitor.
+Right-click 🐇 → **Quit Hop**, or press `Cmd-Q` while the panel is open.
 
 ## Implementation notes
 

@@ -7,15 +7,21 @@ completes. Multiple Tab matches appear as a clickable list, followed by
 your starred favorites and recent history. Click the star next to any path
 to add or remove it from favorites.
 
+Right-click the menu bar icon for Settings (icon, max history, global
+hotkey, start at login) and Quit.
+
 A custom NSPanel is used instead of NSMenu because NSMenu's tracking loop
 captures keyboard events once items are visible, preventing the embedded
 text field from ever seeing Tab/arrow keys.
 """
 
+import ctypes
 import glob
 import json
 import os
+import plistlib
 import subprocess
+from ctypes import CFUNCTYPE, POINTER, Structure, byref, c_int, c_uint, c_void_p
 from pathlib import Path
 
 import objc
@@ -26,16 +32,26 @@ from AppKit import (
     NSButton,
     NSColor,
     NSEvent,
+    NSEventMaskKeyDown,
     NSEventMaskLeftMouseDown,
+    NSEventMaskLeftMouseUp,
     NSEventMaskRightMouseDown,
+    NSEventMaskRightMouseUp,
     NSEventModifierFlagCommand,
+    NSEventModifierFlagControl,
+    NSEventModifierFlagOption,
+    NSEventModifierFlagShift,
     NSFont,
     NSMakeRect,
+    NSMenu,
+    NSMenuItem,
     NSObject,
     NSPanel,
+    NSPopUpButton,
     NSRectFill,
     NSStatusBar,
     NSStatusWindowLevel,
+    NSStepper,
     NSTextField,
     NSTrackingActiveAlways,
     NSTrackingArea,
@@ -45,8 +61,12 @@ from AppKit import (
     NSVisualEffectBlendingModeBehindWindow,
     NSVisualEffectStateActive,
     NSVisualEffectView,
+    NSWindow,
     NSWindowStyleMaskBorderless,
+    NSWindowStyleMaskClosable,
+    NSWindowStyleMaskMiniaturizable,
     NSWindowStyleMaskNonactivatingPanel,
+    NSWindowStyleMaskTitled,
 )
 from PyObjCTools import AppHelper
 
@@ -56,17 +76,37 @@ from PyObjCTools import AppHelper
 DATA_DIR = Path.home() / 'Library' / 'Application Support' / 'Hop'
 DATA_FILE = DATA_DIR / 'data.json'
 
+ICON_BUNNY = '🐇'
+ICON_FOLDER = '📁'
+
+DEFAULT_MAX_HISTORY = 12
+
+DEFAULT_SETTINGS = {
+    'icon': ICON_BUNNY,
+    'max_history': DEFAULT_MAX_HISTORY,
+    'hotkey': None,  # {'modifiers': int, 'keycode': int, 'display': str} or None
+}
+
 
 def load_data():
+    default = {
+        'favorites': [],
+        'history': [],
+        'settings': dict(DEFAULT_SETTINGS),
+    }
     try:
         with open(DATA_FILE) as f:
             d = json.load(f)
-        return {
-            'favorites': list(d.get('favorites', [])),
-            'history': list(d.get('history', [])),
-        }
     except Exception:
-        return {'favorites': [], 'history': []}
+        return default
+    result = {
+        'favorites': list(d.get('favorites', [])),
+        'history': list(d.get('history', [])),
+    }
+    s = dict(DEFAULT_SETTINGS)
+    s.update(d.get('settings') or {})
+    result['settings'] = s
+    return result
 
 
 def save_data(data):
@@ -76,6 +116,187 @@ def save_data(data):
             json.dump(data, f, indent=2)
     except Exception:
         pass
+
+
+# ── Login agent (Start at login) ──────────────────────────────────────────────
+
+LAUNCH_AGENT_LABEL = 'com.burghr.hop'
+LAUNCH_AGENT_PATH = (
+    Path.home() / 'Library' / 'LaunchAgents' / f'{LAUNCH_AGENT_LABEL}.plist'
+)
+PROJECT_DIR = Path(__file__).resolve().parent
+
+
+def login_enabled() -> bool:
+    return LAUNCH_AGENT_PATH.exists()
+
+
+def set_login_enabled(enabled: bool) -> None:
+    if enabled:
+        plist = {
+            'Label': LAUNCH_AGENT_LABEL,
+            'ProgramArguments': [str(PROJECT_DIR / 'run.sh')],
+            'WorkingDirectory': str(PROJECT_DIR),
+            'RunAtLoad': True,
+            'StandardOutPath': '/tmp/hop.out.log',
+            'StandardErrorPath': '/tmp/hop.err.log',
+        }
+        LAUNCH_AGENT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(LAUNCH_AGENT_PATH, 'wb') as f:
+            plistlib.dump(plist, f)
+        subprocess.run(
+            ['launchctl', 'unload', str(LAUNCH_AGENT_PATH)],
+            capture_output=True,
+        )
+        subprocess.run(
+            ['launchctl', 'load', str(LAUNCH_AGENT_PATH)],
+            capture_output=True,
+        )
+    else:
+        if LAUNCH_AGENT_PATH.exists():
+            subprocess.run(
+                ['launchctl', 'unload', str(LAUNCH_AGENT_PATH)],
+                capture_output=True,
+            )
+            LAUNCH_AGENT_PATH.unlink()
+
+
+# ── Global hotkey (Carbon RegisterEventHotKey via ctypes) ────────────────────
+#
+# Carbon hotkeys are intercepted system-wide AND don't require Input Monitoring
+# permission, unlike NSEvent.addGlobalMonitor. The cost is a small ctypes
+# binding layer to Carbon.framework.
+
+_carbon = ctypes.cdll.LoadLibrary(
+    '/System/Library/Frameworks/Carbon.framework/Carbon'
+)
+
+
+def _fourcc(s: str) -> int:
+    return (ord(s[0]) << 24) | (ord(s[1]) << 16) | (ord(s[2]) << 8) | ord(s[3])
+
+
+_kEventClassKeyboard = _fourcc('keyb')
+_kEventHotKeyPressed = 5
+
+_CARBON_CMD = 256
+_CARBON_SHIFT = 512
+_CARBON_OPT = 2048
+_CARBON_CTRL = 4096
+
+
+class _EventTypeSpec(Structure):
+    _fields_ = [('eventClass', c_uint), ('eventKind', c_uint)]
+
+
+class _EventHotKeyID(Structure):
+    _fields_ = [('signature', c_uint), ('id', c_uint)]
+
+
+_HotKeyHandlerProc = CFUNCTYPE(c_int, c_void_p, c_void_p, c_void_p)
+
+_carbon.GetApplicationEventTarget.restype = c_void_p
+_carbon.GetApplicationEventTarget.argtypes = []
+
+_carbon.InstallEventHandler.argtypes = [
+    c_void_p, _HotKeyHandlerProc, c_uint,
+    POINTER(_EventTypeSpec), c_void_p, POINTER(c_void_p),
+]
+_carbon.InstallEventHandler.restype = c_int
+
+_carbon.RegisterEventHotKey.argtypes = [
+    c_uint, c_uint, _EventHotKeyID, c_void_p, c_uint, POINTER(c_void_p),
+]
+_carbon.RegisterEventHotKey.restype = c_int
+
+_carbon.UnregisterEventHotKey.argtypes = [c_void_p]
+_carbon.UnregisterEventHotKey.restype = c_int
+
+
+def _ns_to_carbon_mods(ns_mods: int) -> int:
+    cmods = 0
+    if ns_mods & NSEventModifierFlagCommand:
+        cmods |= _CARBON_CMD
+    if ns_mods & NSEventModifierFlagShift:
+        cmods |= _CARBON_SHIFT
+    if ns_mods & NSEventModifierFlagOption:
+        cmods |= _CARBON_OPT
+    if ns_mods & NSEventModifierFlagControl:
+        cmods |= _CARBON_CTRL
+    return cmods
+
+
+class HotkeyManager:
+    """Registers a single global hotkey via Carbon and fires a Python callback."""
+
+    def __init__(self):
+        self._hotkey_ref = None
+        self._handler_installed = False
+        self._callback = None
+        # Keep strong reference to the C callback so it isn't GC'd.
+        self._handler_proc = _HotKeyHandlerProc(self._handler)
+
+    def _handler(self, call_ref, event, user_data):
+        if self._callback:
+            try:
+                self._callback()
+            except Exception:
+                pass
+        return 0  # noErr
+
+    def _ensure_handler_installed(self):
+        if self._handler_installed:
+            return
+        spec = _EventTypeSpec(_kEventClassKeyboard, _kEventHotKeyPressed)
+        out_ref = c_void_p()
+        target = _carbon.GetApplicationEventTarget()
+        result = _carbon.InstallEventHandler(
+            target, self._handler_proc, 1, byref(spec), None, byref(out_ref)
+        )
+        if result == 0:
+            self._handler_installed = True
+
+    def register(self, ns_modifiers: int, keycode: int, callback) -> bool:
+        """Register the hotkey. Returns True on success."""
+        self.unregister()
+        carbon_mods = _ns_to_carbon_mods(ns_modifiers)
+        if carbon_mods == 0:
+            return False
+        self._callback = callback
+        self._ensure_handler_installed()
+        hkid = _EventHotKeyID(_fourcc('hop1'), 1)
+        out_ref = c_void_p()
+        result = _carbon.RegisterEventHotKey(
+            keycode, carbon_mods, hkid,
+            _carbon.GetApplicationEventTarget(), 0, byref(out_ref),
+        )
+        if result == 0:
+            self._hotkey_ref = out_ref
+            return True
+        return False
+
+    def unregister(self):
+        if self._hotkey_ref is not None:
+            _carbon.UnregisterEventHotKey(self._hotkey_ref)
+            self._hotkey_ref = None
+        self._callback = None
+
+
+def format_hotkey(hk) -> str:
+    if not hk:
+        return 'None'
+    mods = hk.get('modifiers', 0)
+    parts = ''
+    if mods & NSEventModifierFlagControl:
+        parts += '⌃'
+    if mods & NSEventModifierFlagOption:
+        parts += '⌥'
+    if mods & NSEventModifierFlagShift:
+        parts += '⇧'
+    if mods & NSEventModifierFlagCommand:
+        parts += '⌘'
+    key = hk.get('display', '') or ''
+    return parts + key.upper()
 
 
 # ── AppleScript helpers ───────────────────────────────────────────────────────
@@ -141,7 +362,8 @@ SECTION_GAP = 6
 TOP_GAP = 4
 MAX_COMPLETIONS = 10
 MAX_FAVORITES = 8
-MAX_HISTORY = 12
+MAX_FAVORITES_STORED = 24
+MAX_HISTORY = 12  # used as a hard upper bound on what we'll ever display
 MAX_HISTORY_STORED = 50
 
 
@@ -179,7 +401,6 @@ class _CompletionRow(NSView):
         if self is None:
             return None
 
-        # Star toggle (left)
         star = NSButton.alloc().initWithFrame_(
             NSMakeRect(2, 1, 22, frame.size.height - 2)
         )
@@ -192,7 +413,6 @@ class _CompletionRow(NSView):
         self.addSubview_(star)
         self._star = star
 
-        # Path label (right of star)
         label = NSTextField.alloc().initWithFrame_(
             NSMakeRect(26, 1, frame.size.width - 30, frame.size.height - 2)
         )
@@ -209,8 +429,6 @@ class _CompletionRow(NSView):
 
         self._path = None
         self._selected = False
-        self._is_fav = False
-        self._panel = None
         self._tf_del = None
 
         opts = (
@@ -229,7 +447,6 @@ class _CompletionRow(NSView):
         self._label.setStringValue_(path or "")
 
     def setFavorite_(self, is_fav):
-        self._is_fav = bool(is_fav)
         self._star.setTitle_('★' if is_fav else '☆')
 
     def setSelected_(self, sel):
@@ -301,12 +518,13 @@ class _TFDelegate(NSObject):
         self._sel = -1
         self._base_text = ""
         self._programmatic = False
-        self._data = {'favorites': [], 'history': []}
+        self._data = {'favorites': [], 'history': [], 'settings': dict(DEFAULT_SETTINGS)}
         return self
 
     # ── Public ──────────────────────────────────────────────────────────────
 
-    def loadAndRender(self):
+    def _load_and_render(self):
+        self._n_comp = 0  # drop any in-progress completions from a previous open
         self._data = load_data()
         self._render_sections()
 
@@ -409,13 +627,11 @@ class _TFDelegate(NSObject):
             self._show_completions(matches)
 
     def _accept_or_navigate(self):
-        # No selection? Default to first completion if there is one.
         if self._sel < 0:
             if self._n_comp > 0:
                 self._accept_completion(self._completion_rows[0]._path)
             return
         row = self._selectable[self._sel]
-        # If selected row is a tab completion, do the accept-and-recomplete dance.
         if row in self._completion_rows[:self._n_comp]:
             self._accept_completion(row._path)
         else:
@@ -480,6 +696,14 @@ class _TFDelegate(NSObject):
         self._n_comp = 0
         self._render_sections()
 
+    def _max_history_setting(self) -> int:
+        n = self._data['settings'].get('max_history', DEFAULT_MAX_HISTORY)
+        try:
+            n = int(n)
+        except (TypeError, ValueError):
+            n = DEFAULT_MAX_HISTORY
+        return max(0, min(MAX_HISTORY, n))
+
     def _render_sections(self):
         """Rebuild selectable list, populate fav/hist rows, then relayout."""
         self._selectable = []
@@ -487,11 +711,9 @@ class _TFDelegate(NSObject):
 
         favset = set(self._data['favorites'])
 
-        # Completions (already populated by _show_completions)
         for i in range(self._n_comp):
             self._selectable.append(self._completion_rows[i])
 
-        # Favorites
         favs = self._data['favorites'][:MAX_FAVORITES]
         self._n_fav = len(favs)
         for i, row in enumerate(self._favorite_rows):
@@ -501,8 +723,8 @@ class _TFDelegate(NSObject):
                 row.setSelected_(False)
                 self._selectable.append(row)
 
-        # History (excluding paths already shown as favorites)
-        hist = [p for p in self._data['history'] if p not in favset][:MAX_HISTORY]
+        max_hist = self._max_history_setting()
+        hist = [p for p in self._data['history'] if p not in favset][:max_hist]
         self._n_hist = len(hist)
         for i, row in enumerate(self._history_rows):
             if i < self._n_hist:
@@ -519,7 +741,7 @@ class _TFDelegate(NSObject):
             favs.remove(path)
         else:
             favs.insert(0, path)
-            del favs[MAX_FAVORITES * 3:]
+            del favs[MAX_FAVORITES_STORED:]
         save_data(self._data)
         self._render_sections()
 
@@ -557,7 +779,6 @@ class _TFDelegate(NSObject):
         if any_section:
             y -= PADDING
 
-        # Completions
         for i, row in enumerate(self._completion_rows):
             if i < self._n_comp:
                 y -= ROW_H
@@ -566,7 +787,6 @@ class _TFDelegate(NSObject):
             else:
                 row.setHidden_(True)
 
-        # Favorites
         if self._n_fav > 0:
             if self._n_comp > 0:
                 y -= SECTION_GAP
@@ -584,7 +804,6 @@ class _TFDelegate(NSObject):
             else:
                 row.setHidden_(True)
 
-        # History
         if self._n_hist > 0:
             if self._n_comp > 0 or self._n_fav > 0:
                 y -= SECTION_GAP
@@ -613,38 +832,359 @@ class _TFDelegate(NSObject):
         self._layout_subviews(new_h)
 
 
+# ── Settings controller / window ──────────────────────────────────────────────
+
+SETTINGS_W = 420
+SETTINGS_H = 240
+
+
+class _SettingsController(NSObject):
+
+    def init(self):
+        self = objc.super(_SettingsController, self).init()
+        if self is None:
+            return None
+        self._app = None  # _AppDelegate (set externally)
+        self._window = None
+        self._icon_popup = None
+        self._hist_field = None
+        self._hist_stepper = None
+        self._hotkey_label = None
+        self._record_btn = None
+        self._login_checkbox = None
+        self._recording = False
+        self._record_monitor = None
+        return self
+
+    # ── Show ────────────────────────────────────────────────────────────────
+
+    def show(self):
+        if self._window is None:
+            self._build_window()
+        self._populate()
+        self._window.center()
+        self._window.makeKeyAndOrderFront_(None)
+        NSApp.activateIgnoringOtherApps_(True)
+
+    # ── Build ───────────────────────────────────────────────────────────────
+
+    def _build_window(self):
+        rect = NSMakeRect(0, 0, SETTINGS_W, SETTINGS_H)
+        style = (
+            NSWindowStyleMaskTitled
+            | NSWindowStyleMaskClosable
+            | NSWindowStyleMaskMiniaturizable
+        )
+        win = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+            rect, style, NSBackingStoreBuffered, False
+        )
+        win.setTitle_('Hop Settings')
+        win.setReleasedWhenClosed_(False)
+        content = win.contentView()
+
+        label_x = 20
+        label_w = 140
+        ctrl_x = 170
+        row_h = 28
+        # Layout from the top of the content view downward
+        top = SETTINGS_H - 30
+
+        def add_label(text, y, w=label_w):
+            lbl = NSTextField.alloc().initWithFrame_(NSMakeRect(label_x, y, w, 18))
+            lbl.setStringValue_(text)
+            lbl.setBezeled_(False)
+            lbl.setDrawsBackground_(False)
+            lbl.setEditable_(False)
+            lbl.setSelectable_(False)
+            content.addSubview_(lbl)
+            return lbl
+
+        # ── Row 1: Menu bar icon
+        y = top
+        add_label('Menu bar icon:', y + 4)
+        popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
+            NSMakeRect(ctrl_x, y, 160, 26), False
+        )
+        popup.addItemWithTitle_(f'{ICON_BUNNY}  Bunny')
+        popup.addItemWithTitle_(f'{ICON_FOLDER}  Folder')
+        popup.setTarget_(self)
+        popup.setAction_(b'iconChanged:')
+        content.addSubview_(popup)
+        self._icon_popup = popup
+
+        # ── Row 2: Max history
+        y -= row_h + 6
+        add_label('Max history entries:', y + 4)
+        field = NSTextField.alloc().initWithFrame_(NSMakeRect(ctrl_x, y, 60, 22))
+        field.setAlignment_(1)  # right
+        field.setTarget_(self)
+        field.setAction_(b'histFieldChanged:')
+        content.addSubview_(field)
+        self._hist_field = field
+        stepper = NSStepper.alloc().initWithFrame_(NSMakeRect(ctrl_x + 64, y, 19, 22))
+        stepper.setMinValue_(0)
+        stepper.setMaxValue_(MAX_HISTORY)
+        stepper.setIncrement_(1)
+        stepper.setValueWraps_(False)
+        stepper.setTarget_(self)
+        stepper.setAction_(b'histStepperChanged:')
+        content.addSubview_(stepper)
+        self._hist_stepper = stepper
+
+        # ── Row 3: Global hotkey
+        y -= row_h + 6
+        add_label('Global hotkey:', y + 4)
+        hk_label = NSTextField.alloc().initWithFrame_(NSMakeRect(ctrl_x, y + 4, 80, 18))
+        hk_label.setBezeled_(False)
+        hk_label.setDrawsBackground_(False)
+        hk_label.setEditable_(False)
+        hk_label.setSelectable_(False)
+        hk_label.setFont_(NSFont.systemFontOfSize_(14))
+        content.addSubview_(hk_label)
+        self._hotkey_label = hk_label
+        record = NSButton.alloc().initWithFrame_(NSMakeRect(ctrl_x + 84, y, 80, 24))
+        record.setBezelStyle_(1)
+        record.setTitle_('Record')
+        record.setTarget_(self)
+        record.setAction_(b'recordHotkey:')
+        content.addSubview_(record)
+        self._record_btn = record
+        clear = NSButton.alloc().initWithFrame_(NSMakeRect(ctrl_x + 168, y, 60, 24))
+        clear.setBezelStyle_(1)
+        clear.setTitle_('Clear')
+        clear.setTarget_(self)
+        clear.setAction_(b'clearHotkey:')
+        content.addSubview_(clear)
+
+        # ── Row 4: Start at login
+        y -= row_h + 6
+        cb = NSButton.alloc().initWithFrame_(NSMakeRect(label_x, y, 240, 22))
+        cb.setButtonType_(3)  # NSSwitchButton
+        cb.setTitle_('Start Hop at login')
+        cb.setTarget_(self)
+        cb.setAction_(b'loginChanged:')
+        content.addSubview_(cb)
+        self._login_checkbox = cb
+
+        # ── Footer info
+        info = NSTextField.alloc().initWithFrame_(
+            NSMakeRect(label_x, 16, SETTINGS_W - 40, 30)
+        )
+        info.setStringValue_(
+            'Tip: press Esc to cancel hotkey recording. The hotkey is '
+            'consumed system-wide, so pick a combo not used elsewhere.'
+        )
+        info.setBezeled_(False)
+        info.setDrawsBackground_(False)
+        info.setEditable_(False)
+        info.setSelectable_(False)
+        info.setFont_(NSFont.systemFontOfSize_(10))
+        info.setTextColor_(NSColor.secondaryLabelColor())
+        info.cell().setWraps_(True)
+        content.addSubview_(info)
+
+        self._window = win
+
+    # ── Populate from current settings ──────────────────────────────────────
+
+    def _populate(self):
+        s = self._app._tf_del._data['settings']
+        icon = s.get('icon', ICON_BUNNY)
+        self._icon_popup.selectItemAtIndex_(0 if icon == ICON_BUNNY else 1)
+        n = int(s.get('max_history', DEFAULT_MAX_HISTORY) or 0)
+        self._hist_field.setIntegerValue_(n)
+        self._hist_stepper.setIntegerValue_(n)
+        self._hotkey_label.setStringValue_(format_hotkey(s.get('hotkey')))
+        self._login_checkbox.setState_(1 if login_enabled() else 0)
+
+    # ── Actions ─────────────────────────────────────────────────────────────
+
+    def iconChanged_(self, popup):
+        idx = popup.indexOfSelectedItem()
+        icon = ICON_BUNNY if idx == 0 else ICON_FOLDER
+        s = self._app._tf_del._data['settings']
+        s['icon'] = icon
+        save_data(self._app._tf_del._data)
+        self._app._apply_icon()
+
+    def histFieldChanged_(self, field):
+        n = field.integerValue()
+        n = max(0, min(MAX_HISTORY, n))
+        self._hist_field.setIntegerValue_(n)
+        self._hist_stepper.setIntegerValue_(n)
+        self._save_max_history(n)
+
+    def histStepperChanged_(self, stepper):
+        n = stepper.integerValue()
+        self._hist_field.setIntegerValue_(n)
+        self._save_max_history(n)
+
+    def _save_max_history(self, n):
+        self._app._tf_del._data['settings']['max_history'] = int(n)
+        save_data(self._app._tf_del._data)
+
+    def recordHotkey_(self, sender):
+        if self._recording:
+            return
+        self._recording = True
+        self._record_btn.setTitle_('Press…')
+        self._record_monitor = NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
+            NSEventMaskKeyDown, self._on_record_key,
+        )
+
+    def _on_record_key(self, event):
+        keycode = event.keyCode()
+        if keycode == 53:  # Esc cancels recording
+            self._stop_recording()
+            return None
+        mask = (
+            NSEventModifierFlagCommand
+            | NSEventModifierFlagShift
+            | NSEventModifierFlagOption
+            | NSEventModifierFlagControl
+        )
+        modifiers = int(event.modifierFlags() & mask)
+        if modifiers == 0:
+            return None  # require at least one modifier
+        chars = event.charactersIgnoringModifiers() or ''
+        hk = {
+            'modifiers': modifiers,
+            'keycode': int(keycode),
+            'display': chars,
+        }
+        self._app._tf_del._data['settings']['hotkey'] = hk
+        save_data(self._app._tf_del._data)
+        self._hotkey_label.setStringValue_(format_hotkey(hk))
+        self._stop_recording()
+        self._app._apply_hotkey()
+        return None  # swallow
+
+    def _stop_recording(self):
+        self._recording = False
+        self._record_btn.setTitle_('Record')
+        if self._record_monitor is not None:
+            NSEvent.removeMonitor_(self._record_monitor)
+            self._record_monitor = None
+
+    def clearHotkey_(self, sender):
+        self._app._tf_del._data['settings']['hotkey'] = None
+        save_data(self._app._tf_del._data)
+        self._hotkey_label.setStringValue_('None')
+        self._app._apply_hotkey()
+
+    def loginChanged_(self, sender):
+        try:
+            set_login_enabled(sender.state() == 1)
+        except Exception:
+            # Revert on failure
+            sender.setState_(1 if login_enabled() else 0)
+
+
 # ── App delegate / panel controller ───────────────────────────────────────────
+
+NS_EVENT_TYPE_RIGHT_MOUSE_UP = 4
+
 
 class _AppDelegate(NSObject):
 
     def applicationDidFinishLaunching_(self, notif):
+        # Build the panel first so _tf_del exists. _build_panel initializes
+        # _tf_del._data to defaults; we replace it with the loaded data below.
+        self._build_panel()
+        self._tf_del._data = load_data()
+
         self._status = NSStatusBar.systemStatusBar().statusItemWithLength_(-1)
         button = self._status.button()
-        button.setTitle_('🐇')
         button.setTarget_(self)
-        button.setAction_(b'togglePanel:')
+        button.setAction_(b'statusClicked:')
+        button.sendActionOn_(NSEventMaskLeftMouseUp | NSEventMaskRightMouseUp)
+        self._status_button = button
+        self._apply_icon()
 
-        self._build_panel()
-
+        # Outside-click dismiss
         self._mouse_monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
             NSEventMaskLeftMouseDown | NSEventMaskRightMouseDown,
             self._on_outside_click,
         )
 
-    def _on_outside_click(self, event):
-        if self._panel.isVisible():
-            self._panel.orderOut_(None)
+        # Hotkey
+        self._hotkey = HotkeyManager()
+        self._apply_hotkey()
 
-    def togglePanel_(self, sender):
+        # Settings
+        self._settings = None
+
+    # ── Apply settings ──────────────────────────────────────────────────────
+
+    def _apply_icon(self):
+        icon = self._tf_del._data['settings'].get('icon', ICON_BUNNY)
+        self._status_button.setTitle_(icon)
+
+    def _apply_hotkey(self):
+        hk = self._tf_del._data['settings'].get('hotkey')
+        if hk:
+            self._hotkey.register(
+                hk.get('modifiers', 0),
+                hk.get('keycode', 0),
+                self._toggle_via_hotkey,
+            )
+        else:
+            self._hotkey.unregister()
+
+    def _toggle_via_hotkey(self):
         if self._panel.isVisible():
             self._panel.orderOut_(None)
         else:
             self._show_panel()
 
+    # ── Status item handlers ────────────────────────────────────────────────
+
+    def statusClicked_(self, sender):
+        event = NSApp.currentEvent()
+        if event is not None:
+            is_right = event.type() == NS_EVENT_TYPE_RIGHT_MOUSE_UP
+            is_ctrl = bool(event.modifierFlags() & NSEventModifierFlagControl)
+            if is_right or is_ctrl:
+                self._show_context_menu(event)
+                return
+        if self._panel.isVisible():
+            self._panel.orderOut_(None)
+        else:
+            self._show_panel()
+
+    def _show_context_menu(self, event):
+        menu = NSMenu.alloc().init()
+        settings_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            'Settings…', b'showSettings:', ''
+        )
+        settings_item.setTarget_(self)
+        menu.addItem_(settings_item)
+        menu.addItem_(NSMenuItem.separatorItem())
+        quit_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            'Quit Hop', b'quitApp:', 'q'
+        )
+        quit_item.setTarget_(self)
+        menu.addItem_(quit_item)
+        NSMenu.popUpContextMenu_withEvent_forView_(menu, event, self._status_button)
+
+    def quitApp_(self, sender):
+        NSApp.terminate_(None)
+
+    def showSettings_(self, sender):
+        if self._settings is None:
+            self._settings = _SettingsController.alloc().init()
+            self._settings._app = self
+        self._settings.show()
+
+    def _on_outside_click(self, event):
+        if self._panel.isVisible():
+            self._panel.orderOut_(None)
+
+    # ── Panel show ──────────────────────────────────────────────────────────
+
     def _show_panel(self):
-        # Position the panel first with a minimal height; _render_sections will
-        # resize it, anchored to the top edge.
-        button = self._status.button()
+        # Position the panel with a minimal height; _load_and_render resizes.
+        button = self._status_button
         btn_frame = button.window().convertRectToScreen_(button.frame())
         top_y = btn_frame.origin.y - TOP_GAP
         center_x = btn_frame.origin.x + btn_frame.size.width / 2
@@ -654,18 +1194,16 @@ class _AppDelegate(NSObject):
             NSMakeRect(x, top_y - minimal_h, PANEL_W, minimal_h), False
         )
 
-        # Reset transient state and pre-fill text field.
-        self._tf_del._n_comp = 0
         self._err_label.setHidden_(True)
         self._tf.setStringValue_(get_finder_path() or str(Path.home()))
         self._tf_del._base_text = self._tf.stringValue()
-
-        # Load data and lay out (resizes panel, keeps top anchored).
-        self._tf_del.loadAndRender()
+        self._tf_del._load_and_render()
 
         self._panel.makeKeyAndOrderFront_(None)
         self._panel.makeFirstResponder_(self._tf)
         self._tf.selectText_(None)
+
+    # ── Panel build ─────────────────────────────────────────────────────────
 
     def _build_panel(self):
         initial_h = PADDING + TF_H + PADDING
@@ -712,7 +1250,6 @@ class _AppDelegate(NSObject):
             row = _CompletionRow.alloc().initWithFrame_(
                 NSMakeRect(0, 0, PANEL_W, ROW_H)
             )
-            row._panel = panel
             row.setHidden_(True)
             content.addSubview_(row)
             return row
