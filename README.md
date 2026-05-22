@@ -4,6 +4,8 @@ A keyboard-driven address bar for macOS Finder. Click the bunny in your menu
 bar, type a path, hit Enter — Finder jumps there. Tab-completes paths,
 remembers recent destinations, and lets you star any folder as a favorite.
 
+![Hop dropdown showing the path field, favorites, and history](docs/screenshot.png)
+
 ## Why
 
 Finder doesn't have an address bar. `Cmd-Shift-G` opens "Go to folder…" but
