@@ -20,6 +20,7 @@ import glob
 import json
 import os
 import plistlib
+import re
 import subprocess
 from ctypes import CFUNCTYPE, POINTER, Structure, byref, c_int, c_uint, c_void_p
 from pathlib import Path
@@ -317,6 +318,18 @@ def get_finder_path() -> str:
     return r.stdout.strip()
 
 
+_URL_SCHEME_RE = re.compile(r'^[a-zA-Z][a-zA-Z0-9+.\-]*://')
+
+
+def is_url(text: str) -> bool:
+    return bool(_URL_SCHEME_RE.match(text))
+
+
+def open_url(url: str) -> None:
+    """Hand a URL (smb://, afp://, ftp://, etc.) to macOS to mount and open."""
+    subprocess.run(['open', url], timeout=10)
+
+
 def navigate_finder(path: str) -> None:
     escaped = path.replace('"', '\\"')
     subprocess.run(
@@ -569,6 +582,10 @@ class _TFDelegate(NSObject):
 
     def _do_navigate(self):
         raw = self._tf.stringValue()
+        if is_url(raw):
+            self._err_label.setHidden_(True)
+            self._navigate_to(raw)
+            return
         try:
             path = Path(raw).expanduser().resolve()
         except Exception:
@@ -589,9 +606,14 @@ class _TFDelegate(NSObject):
         self._relayout()
 
     def _navigate_to(self, path):
-        norm = path.rstrip('/') + '/'
-        self._record_history(norm)
-        navigate_finder(path)
+        if is_url(path):
+            norm = path.rstrip('/')  # URLs: drop trailing slash for dedup
+            self._record_history(norm)
+            open_url(norm)
+        else:
+            norm = path.rstrip('/') + '/'
+            self._record_history(norm)
+            navigate_finder(path)
         self._panel.orderOut_(None)
 
     def _record_history(self, path):

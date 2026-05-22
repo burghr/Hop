@@ -91,6 +91,16 @@ It works like shell tab-completion:
 `~` is expanded to your home directory. Only directories are listed (not
 files), because the goal is to navigate Finder.
 
+### Network shares (SMB, AFP, FTP, …)
+
+Type a URL like `smb://server/share` (or `afp://`, `ftp://`, `nfs://`,
+etc.) and press Enter. macOS will mount the share via Finder, prompting
+for credentials if needed, and open it. The URL is added to history and
+can be starred as a favorite just like a local path.
+
+Tab-completion only works for local paths. Once a share is mounted it
+appears under `/Volumes/<sharename>/`, which tab-completes normally.
+
 ## Settings
 
 Right-click 🐇 → **Settings…** to configure:
