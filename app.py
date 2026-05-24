@@ -43,6 +43,7 @@ from AppKit import (
     NSEventModifierFlagOption,
     NSEventModifierFlagShift,
     NSFont,
+    NSImage,
     NSMakeRect,
     NSMenu,
     NSMenuItem,
@@ -79,6 +80,15 @@ DATA_FILE = DATA_DIR / 'data.json'
 
 ICON_BUNNY = '🐇'
 ICON_FOLDER = '📁'
+ICON_BUNNY_WHITE = 'sf:hare.fill'
+ICON_BUNNY_OUTLINE = 'sf:hare'
+
+ICONS = [
+    (ICON_BUNNY,         f'{ICON_BUNNY}  Bunny'),
+    (ICON_FOLDER,        f'{ICON_FOLDER}  Folder'),
+    (ICON_BUNNY_WHITE,   '🐰  White Bunny'),
+    (ICON_BUNNY_OUTLINE, '○  Outline Bunny'),
+]
 
 DEFAULT_MAX_HISTORY = 12
 
@@ -927,8 +937,8 @@ class _SettingsController(NSObject):
         popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
             NSMakeRect(ctrl_x, y, 160, 26), False
         )
-        popup.addItemWithTitle_(f'{ICON_BUNNY}  Bunny')
-        popup.addItemWithTitle_(f'{ICON_FOLDER}  Folder')
+        for _, label in ICONS:
+            popup.addItemWithTitle_(label)
         popup.setTarget_(self)
         popup.setAction_(b'iconChanged:')
         content.addSubview_(popup)
@@ -1012,7 +1022,12 @@ class _SettingsController(NSObject):
     def _populate(self):
         s = self._app._tf_del._data['settings']
         icon = s.get('icon', ICON_BUNNY)
-        self._icon_popup.selectItemAtIndex_(0 if icon == ICON_BUNNY else 1)
+        icon_keys = [k for k, _ in ICONS]
+        try:
+            idx = icon_keys.index(icon)
+        except ValueError:
+            idx = 0
+        self._icon_popup.selectItemAtIndex_(idx)
         n = int(s.get('max_history', DEFAULT_MAX_HISTORY) or 0)
         self._hist_field.setIntegerValue_(n)
         self._hist_stepper.setIntegerValue_(n)
@@ -1023,7 +1038,7 @@ class _SettingsController(NSObject):
 
     def iconChanged_(self, popup):
         idx = popup.indexOfSelectedItem()
-        icon = ICON_BUNNY if idx == 0 else ICON_FOLDER
+        icon = ICONS[idx][0]
         s = self._app._tf_del._data['settings']
         s['icon'] = icon
         save_data(self._app._tf_del._data)
@@ -1140,6 +1155,16 @@ class _AppDelegate(NSObject):
 
     def _apply_icon(self):
         icon = self._tf_del._data['settings'].get('icon', ICON_BUNNY)
+        if icon.startswith('sf:'):
+            symbol_name = icon[3:]
+            img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(symbol_name, None)
+            if img:
+                img.setTemplate_(True)
+                self._status_button.setImage_(img)
+                self._status_button.setTitle_('')
+                return
+            icon = ICON_BUNNY  # fallback if SF Symbol unavailable
+        self._status_button.setImage_(None)
         self._status_button.setTitle_(icon)
 
     def _apply_hotkey(self):
@@ -1217,13 +1242,17 @@ class _AppDelegate(NSObject):
         )
 
         self._err_label.setHidden_(True)
-        self._tf.setStringValue_(get_finder_path() or str(Path.home()))
+        path = get_finder_path() or str(Path.home())
+        if not path.endswith('/'):
+            path += '/'
+        self._tf.setStringValue_(path)
         self._tf_del._base_text = self._tf.stringValue()
         self._tf_del._load_and_render()
 
         self._panel.makeKeyAndOrderFront_(None)
         self._panel.makeFirstResponder_(self._tf)
-        self._tf.selectText_(None)
+        editor = self._panel.fieldEditor_forObject_(True, self._tf)
+        editor.setSelectedRange_((len(path), 0))
 
     # ── Panel build ─────────────────────────────────────────────────────────
 
