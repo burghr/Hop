@@ -1208,7 +1208,7 @@ class _AppDelegate(NSObject):
         menu.addItem_(settings_item)
         menu.addItem_(NSMenuItem.separatorItem())
         quit_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            'Quit Hop', b'quitApp:', 'q'
+            'Hop Off (Quit)', b'quitApp:', 'q'
         )
         quit_item.setTarget_(self)
         menu.addItem_(quit_item)
