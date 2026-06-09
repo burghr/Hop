@@ -1,7 +1,7 @@
 # Hop 🐇
 
 A keyboard-driven address bar for macOS Finder. Click the bunny in your menu
-bar, type a path, hit Enter — Finder jumps there. Tab-completes paths,
+bar, type a path, hit Enter, and Finder jumps there. Tab-completes paths,
 remembers recent destinations, and lets you star any folder as a favorite.
 
 ![Hop dropdown showing the path field, favorites, and history](docs/screenshot.png)
@@ -51,7 +51,7 @@ appear above them when you're actively typing.
 | `Enter`        | Navigate Finder to the typed path                            |
 | `Tab`          | Tab-complete: fill in the common prefix, show matches below  |
 | `Tab` (again)  | Accept the first / highlighted completion, then re-complete  |
-| `→` (at end)   | Same as Tab — accept the selected/first row                  |
+| `→` (at end)   | Same as Tab - accept the selected/first row                  |
 | `↑` / `↓`      | Move the keyboard selection through all rows (completions, favorites, history) |
 | `Esc`          | Close the panel                                              |
 | `Cmd-Q`        | Quit Hop                                                     |
@@ -85,7 +85,7 @@ It works like shell tab-completion:
 3. Press `Tab` again → if there are multiple subdirectories, they appear as
    a clickable list. The first one is the default; press `Tab` or `→` to
    accept it and dive deeper, or `↑/↓` to pick a different one.
-4. Keep typing to narrow the list — typing clears the completion list, so
+4. Keep typing to narrow the list. Typing clears the completion list, so
    you can refine your search at any time.
 
 `~` is expanded to your home directory. Only directories are listed (not
@@ -105,15 +105,15 @@ appears under `/Volumes/<sharename>/`, which tab-completes normally.
 
 Right-click 🐇 → **Settings…** to configure:
 
-- **Menu bar icon** — Bunny 🐇 or Folder 📁.
-- **Max history entries** — how many history rows to show (0–12). Stored
+- **Menu bar icon** - Bunny 🐇 or Folder 📁.
+- **Max history entries** - how many history rows to show (0–12). Stored
   history isn't trimmed; this just changes the display cap.
-- **Global hotkey** — click **Record**, then press the combo you want
+- **Global hotkey** - click **Record**, then press the combo you want
   (must include at least one modifier: ⌘/⇧/⌥/⌃). Press the hotkey from
   anywhere to toggle Hop. Uses Carbon's `RegisterEventHotKey`, so the
-  combo is consumed system-wide — pick something not already bound. Press
+  combo is consumed system-wide. Pick something not already bound. Press
   **Esc** while recording to cancel.
-- **Start Hop at login** — toggles the LaunchAgent.
+- **Start Hop at login** - toggles the LaunchAgent.
 
 Settings are saved to `~/Library/Application Support/Hop/data.json`.
 
@@ -126,5 +126,5 @@ Right-click 🐇 → **Quit Hop**, or press `Cmd-Q` while the panel is open.
 Hop uses a custom borderless `NSPanel` instead of `NSMenu` for the dropdown.
 `NSMenu`'s tracking loop captures all keyboard events once items become
 visible, which makes Tab and arrow keys impossible to intercept from an
-embedded text field. A panel sidesteps the problem entirely — it's a normal
+embedded text field. A panel sidesteps the problem entirely. It's a normal
 window with normal event flow.
